@@ -279,18 +279,60 @@ if run_button:
 
     st.write("Using features:", selected_features)
 
-    # Scale features
+    # ----------------------
+    # Robust scaling routine
+    # ----------------------
     X = feats[selected_features].copy()
-    if scaler is not None:
-        try:
-            X_scaled = pd.DataFrame(scaler.transform(X), index=X.index, columns=X.columns)
-        except Exception:
-            # fallback: fit a local scaler
+
+    # 1) ensure numeric dtype
+    X = X.apply(pd.to_numeric, errors='coerce')
+
+    # 2) replace inf/-inf with NaN
+    X.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # 3) quick gap-filling: forward then backward fill (for small missing runs)
+    X = X.fillna(method='ffill').fillna(method='bfill')
+
+    # 4) if still NaNs remain, fill with column medians (robust)
+    if X.isna().any().any():
+        medians = X.median()
+        X = X.fillna(medians)
+        st.warning("Some features had missing values after computation — filled with column medians.")
+
+    # 5) final check for non-finite values (should be none)
+    if not np.isfinite(X.to_numpy()).all():
+        # as last resort, replace any remaining non-finite with 0 (should be extremely rare)
+        X = X.replace([np.inf, -np.inf], np.nan).fillna(0)
+        st.warning("Replaced remaining non-finite feature values with 0 as last resort.")
+
+    # 6) scaling: prefer loaded scaler if compatible; otherwise fit local scaler
+    try:
+        if scaler is not None:
+            # check if scaler was fitted on same number of features
+            try:
+                expected_n_features = scaler.mean_.shape[0]
+            except Exception:
+                expected_n_features = None
+
+            if expected_n_features is None or expected_n_features != X.shape[1]:
+                st.warning("Saved scaler is incompatible with current feature set — fitting a new scaler locally.")
+                local_scaler = StandardScaler()
+                X_scaled = pd.DataFrame(local_scaler.fit_transform(X), index=X.index, columns=X.columns)
+            else:
+                # use the saved scaler (it may still error if column order differs)
+                X_scaled = pd.DataFrame(scaler.transform(X), index=X.index, columns=X.columns)
+        else:
             local_scaler = StandardScaler()
             X_scaled = pd.DataFrame(local_scaler.fit_transform(X), index=X.index, columns=X.columns)
-    else:
+    except ValueError as e:
+        # Catch persistent ValueErrors and attempt one final cleanup
+        st.warning(f"Scaling failed with ValueError: {str(e)}. Attempting final cleanup and local scaling.")
+        X = X.replace([np.inf, -np.inf], np.nan).fillna(X.median()).fillna(0)
         local_scaler = StandardScaler()
         X_scaled = pd.DataFrame(local_scaler.fit_transform(X), index=X.index, columns=X.columns)
+    except Exception as e:
+        st.error("Unexpected error during scaling: " + str(e))
+        st.stop()
 
     # If no models loaded, stop with message
     if not models:
